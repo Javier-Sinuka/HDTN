@@ -1,0 +1,132 @@
+name: HDTN - SonarQube Cloud
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  BUILD_DIR: build
+  BUILD_WRAPPER_OUT_DIR: build-wrapper-output
+  REPORTS_DIR: reports
+
+jobs:
+  build-test-sonar:
+    name: Build, test, coverage and SonarQube Cloud
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install HDTN build and coverage dependencies
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libboost-all-dev \
+            libzmq3-dev \
+            openssl \
+            libssl-dev \
+            lcov \
+            gcovr \
+            python3
+
+      - name: Install SonarQube Build Wrapper
+        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@v8.1.0
+
+      - name: Configure HDTN for coverage
+        run: |
+          set -euxo pipefail
+
+          rm -rf "${BUILD_DIR}" "${BUILD_WRAPPER_OUT_DIR}" "${REPORTS_DIR}"
+          mkdir -p "${REPORTS_DIR}"
+
+          cmake -S . -B "${BUILD_DIR}" \
+            -DCMAKE_BUILD_TYPE=Coverage \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DDO_STATS_LOGGING:BOOL=ON \
+            -DENABLE_STREAMING_SUPPORT:BOOL=ON \
+            -DUSE_X86_HARDWARE_ACCELERATION:BOOL=OFF \
+            -DLTP_RNG_USE_RDSEED:BOOL=OFF
+
+      - name: Build HDTN with SonarQube Build Wrapper
+        run: |
+          set -euxo pipefail
+
+          build-wrapper-linux-x86-64 \
+            --out-dir "${BUILD_WRAPPER_OUT_DIR}" \
+            cmake --build "${BUILD_DIR}" --parallel "$(nproc)"
+
+          test -s "${BUILD_WRAPPER_OUT_DIR}/compile_commands.json"
+
+      - name: Run HDTN unit and integrated tests
+        run: |
+          set -euxo pipefail
+
+          export HDTN_SOURCE_ROOT="${GITHUB_WORKSPACE}"
+          REPORTS_ABS="${GITHUB_WORKSPACE}/${REPORTS_DIR}"
+          mkdir -p "${REPORTS_ABS}"
+
+          pushd "${BUILD_DIR}"
+
+          ./tests/unit_tests/unit-tests \
+            --log_format=JUNIT \
+            --log_sink="${REPORTS_ABS}/unit-tests.xml"
+
+          ./tests/integrated_tests/integrated-tests \
+            --log_format=JUNIT \
+            --log_sink="${REPORTS_ABS}/integrated-tests.xml"
+
+          popd
+
+      - name: Generate SonarQube coverage report with gcovr
+        run: |
+          set -euxo pipefail
+
+          gcovr \
+            --root "${GITHUB_WORKSPACE}" \
+            --object-directory "${GITHUB_WORKSPACE}/${BUILD_DIR}" \
+            --sonarqube "${REPORTS_DIR}/coverage-sonarqube.xml" \
+            --sonarqube-metric branch \
+            --exclude '.*/tests/.*' \
+            --exclude '.*/build/.*' \
+            --exclude '.*/build-wrapper-output/.*' \
+            --exclude '.*/CMakeCXXCompilerId.cpp' \
+            --exclude-throw-branches \
+            --exclude-unreachable-branches \
+            --gcov-ignore-parse-errors \
+            --print-summary
+
+          test -s "${REPORTS_DIR}/coverage-sonarqube.xml"
+
+      - name: Upload test and coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdtn-test-and-coverage-reports
+          path: |
+            reports/*.xml
+            build-wrapper-output/compile_commands.json
+
+      - name: SonarQube Cloud Scan
+        uses: SonarSource/sonarqube-scan-action@v8.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectVersion=${{ github.sha }}
