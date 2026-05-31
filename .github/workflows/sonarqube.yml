@@ -97,8 +97,8 @@ jobs:
             --log_sink="${REPORTS_ABS}/integrated-tests.xml"
 
           popd
-      
-            - name: Generate SonarQube coverage report with gcovr
+
+      - name: Generate SonarQube coverage report with gcovr
         run: |
           set -euxo pipefail
 
